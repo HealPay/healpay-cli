@@ -3,6 +3,7 @@ healpay-cli
 
 Usage:
 
+```
 healpay.exe [command]:
   -debug
         debug mode
@@ -22,3 +23,4 @@ healpay.exe [command]:
         gateway pin
   -timeout int
         request timeout interval (default 60)
+```
