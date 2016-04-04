@@ -1,0 +1,143 @@
+package main
+
+import (
+	"log"
+	"fmt"
+	"flag"
+	"bytes"
+	"errors"
+	"io/ioutil"
+	"github.com/healpay/healpay-go"
+	"strconv"
+	"os"
+)
+
+var Usage = func(flags *flag.FlagSet) {
+	fmt.Fprintf(os.Stderr, "Usage of %s [command]:\n", os.Args[0])
+	flags.PrintDefaults()
+	os.Exit(0)
+}
+
+func Error(err error, errPath* string) {
+	if err == nil { return }
+	if *errPath != "" {
+		err = ioutil.WriteFile(*errPath, []byte(err.Error()), 0644)
+		if err != nil { panic(err) }
+	} else {
+		fmt.Fprintf(os.Stderr, "%s\n", err.Error())
+	}
+	os.Exit(0)
+}
+
+func main() {
+	cmd := ""
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
+	}
+
+	flags := flag.NewFlagSet(cmd, flag.ExitOnError)
+
+	location := flags.String("location", "", "healpay endpoint")
+	key := flags.String("key", "", "gateway source key")
+	pin := flags.String("pin", "", "gateway pin")
+	inPath := flags.String("in", "", "grab input from file instead of stdin")
+	out := flags.String("out", "", "write output to file instead of stdout")
+	errPath := flags.String("error", "", "write errors to file instead of stderr (excluding HealPay errors)")
+	debug := flags.Bool("debug", false, "debug mode")
+	legacy := flags.Bool("legacy", false, "support legacy JSON API. (Only Applies to runTransction)")
+	timeout := flags.Int("timeout", 60, "request timeout interval")
+
+	if len(os.Args) > 1 {
+		flags.Parse(os.Args[2:])
+	}
+
+	// Command Required
+	if cmd == "" {
+		Usage(flags)
+	}
+	
+	// Required Flags
+	if *location == "" || *key == "" || *pin == "" {
+		Usage(flags)
+	}
+
+	// Input
+	var in []byte
+	var err error
+	if *inPath == "" {
+		in, err = ioutil.ReadAll(os.Stdin)
+		if err != nil { Error(err, errPath) }
+	} else {
+		in, err = ioutil.ReadFile(*inPath)
+		if err != nil { Error(err, errPath) }
+	}
+
+	token := healpay.NewToken(*key, *pin)
+
+	var req healpay.Request
+	var res healpay.Response
+	var body bytes.Buffer
+	var legacyBody []byte
+
+	if *legacy != true {
+		body.WriteString("<ns1:")
+		body.WriteString(cmd)
+		body.WriteString(">\n")
+	}
+
+	switch cmd {
+	case "getTransactionReport":
+		res = new(healpay.GetTransactionReportResponse)
+	case "searchTransactionsCustom":
+		res = new(healpay.SearchTransactionsCustomResponse)
+	case "searchCustomers":
+		req = new(healpay.SearchCustomersRequest)
+		req.SetToken(token)
+		res = new(healpay.SearchCustomersResponse)
+	case "createBatchUpload":
+		req = new(healpay.CreateBatchUploadRequest)
+		req.SetToken(token)
+		res = new(healpay.CreateBatchUploadResponse)
+	case "runTransaction":
+		if *legacy {
+			req = new(healpay.RunTransactionRequest)
+			req.SetToken(token)
+			legacyBody, err = healpay.JSONToXML(req, in)
+			if err != nil { Error(err, errPath) }
+		}
+		res = new(healpay.RawResponse)
+	default:
+		res = new(healpay.RawResponse)
+	}
+
+	if *legacy != true {
+		body.Write(in)
+		body.WriteString(token.XMLString())
+		body.WriteString("\n</ns1:")
+		body.WriteString(cmd)
+		body.WriteString(">")
+	} else {
+		body.Write(legacyBody)
+	}
+
+	if *debug { log.Println(body.String()) }
+
+	httpReq, err := healpay.NewRequest(*location, body.String())
+	httpReq.Header.Add("ApiTimeout", strconv.Itoa(*timeout))
+	if err != nil { Error(err, errPath) }
+	httpResp, fullBody, err := res.Handle(httpReq, *timeout)
+	if err != nil { Error(err, errPath) }
+	b, err := res.Decode(fullBody)
+	if err != nil { Error(err, errPath) }
+	if httpResp.StatusCode != 200 {
+		err = errors.New(string(b))
+		Error(err, errPath)
+	}
+	// write whole the body
+	if *out == "" {
+		os.Stdout.Write(b)
+	} else {
+		err = ioutil.WriteFile(*out, b, 0644)
+		if err != nil { Error(err, errPath) }
+	}
+}
